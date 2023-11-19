@@ -1,118 +1,67 @@
 #include<stdio.h>
-#define MAX 5000 // 4096, but base 10 makes it easier to read in debugger
-#define STRLEN 16
+#define MAX 1024
 #define DEBUG 0
 
-// the memory arrays in question. mem stores concells, strings stores atoms
-// the ith concell has its car at position 2*i and its cdr at pos 2*i+1
-// string indices are array index + MAX
-// keep in mind that first element of mem is reserved for null
-int mem[MAX*2]={0};
-char strings[MAX*STRLEN]={0};
+int mem[MAX];
+char strings[MAX];
+int lastmem,laststring;
 
-// the current top of stack
-int lastmem=1,laststring=0;
+#define iscons(x) (0<x && x<MAX)
+#define isstr(x) (MAX<=x && x<2*MAX)
+#define getstr(x) (strings+x-MAX)
+
+const char initmem[]="nil\0t\0defun\0lambda\0cond\0atom\0eq\0car\0cdr\0cons\0quote\0print\0mem\0+\0-\0*\0/\0%";
 
 void init(){
-	// apparently weve been having issues w/ this?
-	for(int i=0;i<MAX*2;i++)mem[i]=0;
-	for(int i=0;i<MAX*STRLEN;i++)strings[i]=0;
+	lastmem=2; // so null pointers are valid
+	for(int i=0;i<MAX;i++)mem[i]=strings[i]=0;
+	laststring=sizeof(initmem);
+	for(int i=0;i<laststring;i++)strings[i]=initmem[i];
 }
 
-int car(int index){return mem[2*index];}
-int cdr(int index){return mem[2*index+1];}
-char*getstr(int index){return strings+(index-MAX)*STRLEN;}
+#define car(x) mem[x]
+#define cdr(x) mem[x+1]
+
+/* not as useful as i thought it would be
+int at(int a,int i){
+	while(i--)a=cdr(a);
+	return car(a);
+}*/
 
 int cons(int car,int cdr){
-	// garbage collector?
-	if(lastmem>=MAX){
-		printf("memory overflow!\n");
-		return 0; // XXX hcf
-	}
-	mem[2*lastmem]=car;
-	mem[2*lastmem+1]=cdr;
-	return lastmem++;
+	mem[lastmem++]=car;
+	mem[lastmem++]=cdr;
+	return lastmem-2;
 }
 
-int newstring_s(char*string){
-	// this assumes string memory management is handled externally
-	for(int i=0;i<laststring;i++)
-	if(strings[STRLEN*i]){
-		/* XXX still fucked
-		int same=1;
-		for(int j=0;j<STRLEN && strings[STRLEN*i+j];j++)
-			if(string[j]!=strings[STRLEN*i+j])
-				same=0;
-		if(same)return i+MAX;
-		*/
-		if(!strcmp(string,strings+STRLEN*i))return i+MAX;
+int intern(){
+	// adapted from sectorlisp
+	char c;
+	for(int i=0;i<laststring;){ // iterates over strings in memory
+		c=strings[i++];
+		for(int j=0;;j++){
+			if(!c&&!strings[laststring+j])return i-j-1+MAX; // reached end of new string, iow got a match
+			if(c!=strings[laststring+j])break; // char dont match, stop testing
+			c=strings[i++];
+		}
+		while(c)c=strings[i++]; // reels to beginning of next string
 	}
 
-	if(laststring>=MAX){
-		printf("strings overflow!\n");
-		return 0; // XXX hcf
-	}
-
-	for(int i=0;i<STRLEN && string[i];i++){
-		strings[laststring*STRLEN+i]=string[i];
-	}
-	laststring++;
-	return laststring-1+MAX;
-}
-
-#define iscons(x) (x<MAX)
-#define isstr(x) (MAX<=x && x<2*MAX)
-
-// ~~~ utility prints
-
-void pprint_(int i){
-	if(i==0)printf("<0>");
-	else if(i<MAX){
-		putchar('(');
-		pprint_(car(i));
-
-		for(int t=cdr(i);t;t=cdr(t))
-			if(t<MAX)putchar(' '),pprint_(car(t));
-			else putchar('.'),pprint_(t),t=0;
-
-		putchar(')');
-	}else printf("%s",getstr(i));
-}
-
-void pprint(int i){pprint_(i);putchar(10);}
-
-void printmem(){
-	// for debugging, prints the memory itself
-	printf("%i cons defined, %i atoms\n",lastmem,laststring);
-	for(int i=0;i<lastmem;i++)
-		printf("%i:(%i.%i) | ",i,car(i),cdr(i));
-	putchar(10);
-	for(int i=0;i<laststring;i++)
-		printf("%i:<%s> | ",i+MAX,strings+i*STRLEN);
-	putchar(10);
+	int ret=laststring; // cache beginning of new item
+	while(strings[laststring++]); // update stack pointer
+	return ret+MAX;
 }
 
 // ~~~ parsing
 
 FILE*fd;char lookahead=0;
 
+// XXX some of these can probably be defined
 int iswhite(char a){return a==' '||a=='\n'||a=='\t';}
-int isparen(char a){return a=='('||a==')'||a==EOF;}
 char getnext(){return lookahead=getc(fd);}
-char white(){
+char white(){ // XXX this should prolly also skip over comments
 	while(iswhite(lookahead))getnext();
 	return lookahead;
-}
-
-int newstring(){
-	// read from stdio and process that
-	char buf[STRLEN]={0};
-	for(int i=0;i<STRLEN && !iswhite(lookahead) && !isparen(lookahead);i++){
-		buf[i]=lookahead;
-		getnext();
-	}
-
-	return newstring_s(buf);
 }
 
 int parselist(){
@@ -121,230 +70,294 @@ int parselist(){
 
 	int car;
 	if(lookahead=='('){getnext();car=parselist();}
-	else car=newstring();
+	else{ // newstring
+		int i=0;
+		while(!iswhite(lookahead) && lookahead!='(' && lookahead!=')'){
+			strings[laststring+i++]=lookahead;
+			getnext();
+		}
+		strings[laststring+i]=0;
+		car=intern();
+	}
 
 	return cons(car,parselist());
 }
 
+// ~~~ utility prints
+
+int pprint_(int i,int env){
+	if(i==0){printf("<0>");return env;}
+	if(i==env){printf("<etc %i>",i);return env;}
+	if(i<env)env=i;
+
+	if(i<MAX){
+		putchar('(');
+		pprint_(car(i),env);
+
+		// pretty sure this can be improved
+		// XXX make pprint return env?
+		// XXX undo that, it doesnt do shit
+		for(int t=cdr(i);t;t=cdr(t))
+			if(t==env){printf(" <etc %i>)",t);return env;}
+			else if(t<MAX)putchar(' '),env=pprint_(car(t),env);
+			else putchar('.'),env=pprint_(t,env),t=0;
+
+		putchar(')');
+		return env;
+	}
+
+	//printf("%s",strings[i-MAX]);
+	printf("%s",getstr(i));
+	return env;
+}
+
+void pprint(int i,int env){pprint_(i,env);putchar(10);}
+
+void printmem(int env){
+	// XXX optimise this a bit?
+	void pcell(int i){
+		//if(isstr(i))printf("<%s>",strings[i-MAX]);
+		if(isstr(i))printf("<%s>",getstr(i));
+		else printf("%i",i);
+	}
+
+	printf("%i cons defined, %i atoms, env is %i\n",lastmem,laststring,env);
+
+	for(int i=0;i<lastmem;i+=2){
+		printf("%i:(",i);
+		pcell(car(i));
+		putchar('.');
+		pcell(cdr(i));
+		printf(") | ");
+	}
+	printf("\n\n");
+
+	int i=0;
+	while(strings[i] && i<laststring){
+		printf("%i:",i);
+		while(strings[i])putchar(strings[i++]);
+		i++;
+		printf(" | ");
+	}
+	printf("\n\n");
+}
+
 // ~~~ interpretation
 
-int eval(int exp,int env);
-
+// XXX ideally, use digit arithmetic
 int atoi(int index){
 	int res=0;
-	for(int i=0;i<STRLEN;i++){
-		char a=*(strings+(index-MAX)*STRLEN+i);
-		if(!a)break;
-		if(a<'0'||a>'9')printf("'%c' (%i) not a digit\n",a,a);
+	char*str=strings+index-MAX;
+	if(DEBUG)printf("atoi<%s>\n",str);
+	for(;*str;str++){
+		char a=*str;
+		if(a<'0'||a>'9')
+			printf("'%c' (%i) not a digit\n",a,a);
 		else res=res*10+a-'0';
 	}
 	return res;
 }
 
-int itoa(int i){
-	char buf[STRLEN]={0};
-	sprintf(buf,"%i",i);
-	return newstring_s(buf);
+int itoa(int x){
+	if(DEBUG)printf("itoa<%i>\n",x);
+	if(x==0){
+		strings[laststring]='0';
+		strings[laststring+1]=0;
+		return intern();
+	}
+	int ret=laststring,i=0;
+	while(x){
+		strings[laststring+i++]=(x%10)+'0';
+		x/=10;
+	}
+	strings[laststring+i]=0;
+	if(DEBUG)printf("int of length %i\n",i);
+	char swap;
+	for(int j=0;j<i/2;j++){
+		swap=strings[laststring+j];
+		strings[laststring+j]=strings[laststring+i-j-1];
+		strings[laststring+i-j-1]=swap;
+	}
+	return intern();
 }
 
-int primfn(int exp,int env){
-	int fn=car(exp),args=cdr(exp);
-	if(DEBUG){printf("prime func: ");pprint(fn);}
-
-	// helpers
-	if(fn==newstring_s("mem")){
-		printmem();
-		printf("env:%i:",env);pprint(env);
-		return 0;
-	}
-
-	if(fn==newstring_s("display")){
-		int t=car(eval(car(args),env));
-		pprint(t);
-		return t;
-	}
-
-	// arguments are evaluated in the wrong order - not sure if that makes a difference
-	if(fn==newstring_s("cons")){
-		return
-		cons(
-			car(eval(car(args),env)),
-			car(eval(car(cdr(args)),env))
-		);
-	}
-
-	if(fn==newstring_s("car"))return car(car(eval(car(args),env)));
-	if(fn==newstring_s("cdr"))return cdr(car(eval(car(args),env)));
-	if(fn==newstring_s("atom"))return isstr(car(eval(car(args),env)))?newstring_s("t"):0;
-	if(fn==newstring_s("eq"))return car(eval(car(args),env)) == car(eval(car(cdr(args)),env))?newstring_s("t"):0;
-	if(fn==newstring_s("quote"))return args;
-	if(fn==newstring_s("lambda"))return exp;
-
-	if(fn==newstring_s("cond")){
-		for(int cond=args;cond;cond=cdr(cond))
-			if(car(eval(car(car(cond)),env)))
-				return car(eval(car(cdr(car(cond))),env));
-		return 0;
-	}
-
-	// XXX bignums
-	if(fn==newstring_s("+")){
-		int res=0;
-		for(;args;args=cdr(args))
-			res+=atoi(car(eval(car(args),env)));
-		return itoa(res);
-	}
-
-	if(fn==newstring_s("*")){
-		int res=1;
-		for(;args;args=cdr(args))
-			res*=atoi(car(eval(car(args),env)));
-		return itoa(res);
-	}
-
-	if(fn==newstring_s("-")){
-		int res=atoi(car(eval(car(args),env)));
-		for(args=cdr(args);args;args=cdr(args))
-			res-=atoi(car(eval(car(args),env)));
-		return itoa(res);
-	}
-
-	if(fn==newstring_s("/")){
-		int res=atoi(car(eval(car(args),env)));
-		for(args=cdr(args);args;args=cdr(args))
-			res/=atoi(car(eval(car(args),env)));
-		return itoa(res);
-	}
-
-	if(fn==newstring_s("%")){
-		int res=atoi(car(eval(car(args),env)));
-		for(args=cdr(args);args;args=cdr(args))
-			res%=atoi(car(eval(car(args),env)));
-		return itoa(res);
-	}
-
-	printf(">not primfn:");pprint(fn);
-	return 0;
+int evlist(int exp,int env){
+	// XXX rewrite this to be sequential and put it in eval
+	if(!exp)return 0;
+	return cons(eval(car(exp),env),evlist(cdr(exp),env));
 }
 
 int eval(int exp,int env){
-	if(DEBUG){printf("> ");pprint(exp);}
-	if(!exp)return cons(0,env);
+	if(DEBUG){printf("> eval: ");pprint(exp,env);}
+	if(!exp || exp==MAX)return 0;
 
 	if(isstr(exp)){
-		for(int val=env;val;val=cdr(val))
-			if(car(car(val))==exp) // since both are already in-memory
-				return cons(cdr(car(val)),env);
-		return cons(exp,env);
+		for(int cloj=env;cloj;cloj=cdr(cloj))
+			for(int bind=car(cloj);bind;bind=cdr(bind))
+				if(car(car(bind))==exp) // atoms are unique
+					return cdr(car(bind));
+		if(DEBUG)printf("> isself: "),pprint(exp,env);
+		return exp;
 	}
 
-	// XXX evaluate all elements of exp then match first?
+	// assuming cons
+	int op = eval(car(exp),env);
 
-	if(isstr(car(exp))){
-		int op=car(eval(car(exp),env));
+	//if(DEBUG)printf("> op: "),pprint(op,env); // XXX this fucks up?
 
-		if(DEBUG){printf(">newfun:");pprint(op);}
+	if(isstr(op)){
+		op-=MAX;
 
-		if(iscons(op)) // function application, aka lambda
-			// XXX consider making this a fallthrough instead?
-			return eval(cons(op,cdr(exp)),env);
-
-		// only predefined function that changes the environment
-		if(op==newstring_s("defun")){
-			// XXX this can prolly be simplified...
-			int a = car(cdr(exp));
-			int b = car(cdr(cdr(exp)));
-
-			b = car(eval(b,env));
-
-			int c = cons(a,b);
-			env=cons(c,env);
-
-			return cons(a,env);
+		// quote
+		if(op==45)return car(cdr(exp));
+		if(op==6){ // defun
+			car(env) =
+				cons(
+					cons(
+						car(cdr(exp)),
+						eval(car(cdr(cdr(exp))),env)
+					),car(env)
+				);
+			return car(cdr(exp));
 		}
 
-		//return cons(primfn(exp,env),env);
-		return cons(primfn(cons(op,cdr(exp)),env),env);
+		if(op==12){ // lambda
+			//exp = (lambda (<vars>) (<body>) . env)
+			if(cdr(cdr(cdr(exp)))==0){
+				if(DEBUG)printf("> set lenv %i\n",env);
+				return cons(op,cons(car(cdr(exp)),cons(car(cdr(cdr(exp))), env )));
+			}
+			if(DEBUG)printf("> lenv:%i, env:%i\n",cdr(cdr(cdr(exp))),env);
+			return exp;
+		}
+
+		if(op==19){ // cond
+			for(int cond=cdr(exp);cond;cond=cdr(cond))
+				if(eval(car(car(cond)),env)!=MAX)
+					return eval(car(cdr(car(cond))),env);
+			return 0;
+		}
+
+		// XXX could also map to another function? how do we take care of that?
+		// eg eval(f)=subleq,eval(subleq)=(lambda ...)
+		// try reevaluating it until it doesnt change?
+
+		// apply
+		int args=evlist(cdr(exp),env),res;
+
+		if(DEBUG){printf("> apply: ");pprint(op,env);}
+
+		switch(op){
+			case 51: // print
+				pprint(car(args),env);
+				return car(args);
+			case 57: // mem
+				printmem(env);
+				return 0;
+			case 40: // cons
+				return
+				cons(
+					car(args),
+					car(cdr(args))
+				);
+			// car cdr atom eq - not sure abt returns
+			case 32:return car(car(args));
+			case 36:return cdr(car(args));
+			case 24:return MAX+(isstr(car(args))?4:0);
+			case 29:return MAX+(car(args)==car(cdr(args))?4:0);
+
+			// XXX bignums
+			case 61: // +
+				res=0;
+				for(;args;args=cdr(args))
+					res+=atoi(car(args));
+				return itoa(res);
+
+			case 65: // *
+				res=1;
+				for(;args;args=cdr(args))
+					res*=atoi(car(args));
+				return itoa(res);
+
+			case 63: // -
+				res=atoi(car(args));
+				for(args=cdr(args);args;args=cdr(args))
+					res-=atoi(car(args));
+				return itoa(res);
+
+			case 67: // /
+				res=atoi(car(args));
+				for(args=cdr(args);args;args=cdr(args))
+					res/=atoi(car(args));
+				return itoa(res);
+
+			case 69: // %
+				res=atoi(car(args));
+				for(args=cdr(args);args;args=cdr(args))
+					res%=atoi(car(args));
+				return itoa(res);
+
+			default:
+				printf("> not primfn:");pprint(op+MAX,env);
+				return 0;
+		}
 	}
 
-	// XXX check this exists before referencing
-	// eg car(exp) could be null
-	// maybe put t here?
-	if(car(car(exp)) == newstring_s("lambda")){
+	if(car(op)==12){ // lambda
+		if(DEBUG)printf("> application\n");
 		// closure time!
-		int cloj=env,names=car(cdr(car(exp))),vals=cdr(exp);
+		int cloj=0,names=car(cdr(op)),vals=cdr(exp);
 		for(;names;names=cdr(names),vals=cdr(vals))
-			cloj=cons(cons(car(names),car(eval(car(vals),env))),cloj);
-		int res = eval(car(cdr(cdr(car(exp)))),cloj);
-		return cons(car(res),env);
+			cloj=cons(
+				cons(
+					car(names),
+					eval(car(vals),env)
+				),
+				cloj);
+		return eval(car(cdr(cdr(op))),cons(cloj,cdr(cdr(cdr(op)))));
 	}
 
-	// XXX if all else fails, try evaluating arguments in order?
-	//return eval(cdr(exp),cdr(eval(car(exp))));
-
-	int t = eval(car(exp),env);
-	if(cdr(exp))return eval(cdr(exp),cdr(t));
-	else return t;
-
-	printf(">wtf:");pprint(exp);
+	printf("> wtf:");pprint(exp,env);
 
 	return 0;
 }
 
-int main(){
+int main(int argc,char**argv){
 	init();
-	int env=0;
-	fd=stdin;
+	int env=cons(0,0),data=0;
+	if(argc>1)fd=fopen(argv[1],"r");
+	else fd=stdin;
 	while(1){
-		if(feof(fd))return 0;
-		getnext();
-		white();
-		getnext();
-		white();
-		int data=parselist();
-		//pprint(data);
-		int res=eval(data,env);
-		env=cdr(res);
-		pprint(car(res));
+		printf("> ");//fflush(0);
+		if(feof(fd))break;
+		// XXX i feel like it should be possible to do this somewhat better...
+		getnext();white();getnext();
+		data=parselist();
+		if(DEBUG){printf("input: ");pprint(data,env);}
+		data=eval(data,env);
+		printf("< ");pprint(data,env);
+		if(DEBUG)printf("\n\n\n");
 	}
+	putchar(10);
+	fclose(fd);
 	return 0;
 }
 
-// rename car cdr to just car cdr
-// newcell iscoll etc are shitty names, consolidate
-// get rid of global lookahead
+// get rid of global lookahead (?)
+//  or just generally package the parsing functions
+// rename primfn to apply?
 
-// cond map let/defun eval apply quote lambda +-*/=
-// defun lambda cond eq car cdr cons quote +-*/%
-// atom?
+// try implementing streams and structures w/ internal state ala sicp
+//  "structures w/ internal state" are gon have to be done thru closures and access functions
+// streams gon need some peripherals for delayed evaluation, idk if those are gonna be as straight-forward
+// do we wanna do electronic circuits as well?
+// multithreading, arrays
 
-// XXX well need to have something that goes thru a list and evaluates as it goes
-// (define f lambda (x y) (define sq lambda (x) (* x x)) (+ (sq x) (sq y)))
-// i mean, LET exists, tho idk list of instructions makes more sense imo...
-// we could also treat DEFUNs as a function applying a closure to the rest of the code block
-// sounds cool, but its a specific solutoin, wed like a general one. any list of expressions evaluates to the last one (unless context implies otherwise)
-// we could have a wrapper for that, but what would the usecase be?
-//  a=eval(car(exp));if(!cdr(exp))return a; else evlist(b)
-// cant we just do this at the bottom of eval? if all else fails, evaluate car, then iterate over cdr?
+// garbage collector still fucked up by the fact that defuns work outside and separately from evaluation
+// does that make a difference? we keep stuff we defined (globally), everything else can go. if we define smth w/in a function, that definition is no longer valid nor needed once the function exits, so we can get rid of it
+// and closures are tied to objects, so no issues there either
 
-// can we pass env as a pointer to eval? and then just have it set that?
-// also its ONE FUCKING COMMAND that actually does shit to env, wtf
-
-// newlines cause the next expr to be wrapped in a cell
-
-// closures r fucked, curryin dont work
-// closures are a useful, but not NECESSARY, part of lisp, so why bother
-
-// (let (a) (b) c) - binds values in b to atoms in a, then evaluates c in the new closure
-// we might have to get a bit obsessive about keeping environments throughout operations
-// either that, or we do the pass-by-reference thing
-// (do a) - foreach in a, evaluate it, return last
-// (lambda args body . env) - store closure in lambda
-// how will we combine that env with the current one tho? only way i can think is that eval must take a stack of environments, which kinda fucks shit up...
-// also, where exactly do we store the closure? what even is the closure exactly?
-
-// garbage collector
-// shouldnt even be that hard, might wanna include a tag on whether a cell is free tho
-// (()) = (().()) = 0,0 in memory, so we cant check for that. id argue its a stupid expression, but still.
-//  wait, since all of those would be identical, we could repoint all instances of that to nil - wait fuck. nvm.
-// welp, tags it is! 1<<(sizeof(int)-1) should do
+// imperative subsections - essentially a 'do' command, with somewhat different internals
+//  let can take care of that - except we dont even use let...
+// direct memory access - thats more a thing of 'put it in and see what happens'
+//  gonna mess up the garbage collector even more, but eh
